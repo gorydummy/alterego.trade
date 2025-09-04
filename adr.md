@@ -157,3 +157,132 @@ Indicator/bias/NLG endpoints, retries/backoff, error handling; security logging 
 * Revisit **ADR‑002** after first 50 testers to confirm broker priority.
 * Revisit **ADR‑001** if event volume > 10k/day/user or replay windows grow; consider Redis Streams or Kafka.
 * Upgrade **ADR‑003** to mTLS once deployment platform supports automated cert issuance reliably.
+
+---
+
+## ADR‑004 — Market Data Sourcing (Broker vs Vendor, Caching & Reproducibility)
+
+**Status:** Proposed (accept after integration spike)
+
+### Context
+
+Bias features and simulations require OHLCV. Broker APIs may throttle or differ in granularity; third‑party vendors add cost but improve reliability. We also need reproducibility for audits and weekly reports.
+
+### Decision
+
+1. **Primary source:** Use **broker OHLCV** for symbols traded when quotas/granularity allow.
+2. **Fallback vendor:** Add a vendor adapter with **crypto → CoinAPI** and **equities/FX → Alpha Vantage** behind a feature flag.
+3. **Caching & snapshots:** Cache OHLCV in Redis (symbol, granularity, window) with TTL; **persist weekly snapshots** (per user/symbol/week) to S3 for reproducible digests and simulations.
+
+### Consequences
+
+* Lower latency and cost when broker data suffices; vendor smooths quota gaps.
+* Snapshotting enables deterministic counterfactuals for past periods.
+* Slight storage overhead for snapshots; lifecycle policy cleans after 90 days.
+
+### Alternatives considered
+
+* Vendor‑only (simpler, but recurring cost + vendor outages).
+* Broker‑only (free, but quotas/granularity gaps and occasional maintenance windows).
+* Self‑hosted market data (overkill for MVP).
+
+### Implementation notes
+
+* Define `MarketDataAdapter` interface; select source per request with health/latency scoring.
+* Include `source` in cache key and in `features` metadata for transparency.
+* Add rate‑limit guards and circuit breakers per source.
+
+---
+
+## ADR‑005 — Rules Schema Evolution & Personalization
+
+**Status:** Accepted
+
+### Context
+
+We need explainable, user‑tunable guardrails now, with a path to personalization later without introducing a complex DSL prematurely.
+
+### Decision
+
+* **Schema v1:** Per‑rule JSON (`kind`, `params`, `active`) validated by Zod; store in `Rule.params`.
+* **Evaluation:** At import/scoring time for MVP; future pre‑trade checks optional.
+* **Personalization v1.1:** Update thresholds per user using **Bayesian calibration** over rolling windows (e.g., spike threshold that maximizes historical precision/recall). Persist learned value back into `Rule.params` with provenance.
+
+### Consequences
+
+* Keeps rules transparent and editable; avoids opaque ML gates.
+* Users see their guardrails evolve with evidence.
+* Requires audit trail of threshold changes and a rollback mechanism.
+
+### Alternatives considered
+
+* DSL or rules engine (e.g., json‑logic) now — too heavy; reduces clarity.
+* Pure ML classifier — less explainable; harder to build trust.
+
+### Implementation notes
+
+* Add `RuleRevision` table (ruleId, params, reason, ts).
+* UI: change badges when personalization updates thresholds; tooltip shows last update evidence.
+
+---
+
+## ADR‑006 — Persona Strategy & LLM Cost/Safety Controls
+
+**Status:** Accepted
+
+### Context
+
+Personas drive engagement but can create scope creep and LLM cost volatility. We need a disciplined approach that preserves tone variety while controlling tokens and safety.
+
+### Decision
+
+* **MVP personas:** Ship **Rational Future Self** only; expose **tone** (supportive/strict) as a user setting.
+* **Celebrity clones:** Behind feature flags; modeled as **principle presets** (value, growth, macro) that influence advice framing, not asset calls.
+* **Cost controls:** `temperature=0`, short prompts with **feature summaries only**, JSON‑mode outputs, Redis caching keyed by `(features,label,tone,persona)`, **per‑user daily token budget** with soft caps.
+* **Safety:** System prompt enforces “behavioral coach, not financial advice”; refuse prescriptive trade calls; profanity/harassment filter applied to outputs.
+
+### Consequences
+
+* Predictable LLM spend; easy to A/B tone without new prompts.
+* Clear compliance posture: behavior‑focused, not signals.
+* Path to a marketplace later without re‑architecting.
+
+### Alternatives considered
+
+* Full persona marketplace at MVP — distracts from core loop, increases cost.
+* Fine‑tuned persona models — premature; templated principles suffice early.
+
+### Implementation notes
+
+* Persona = `{ id, name, principles[], tone }`; merge into prompt context.
+* Log `tokens_in/out` per request for budget dashboards; raise UI hint when nearing cap.
+
+---
+
+## ADR‑007 — Idempotency & Rate‑Limiting Strategy (HTTP & Jobs)
+
+**Status:** Accepted
+
+### Context
+
+Imports/simulations can be re‑triggered by users or retries. We need consistent dedupe and fair usage protections.
+
+### Decision
+
+* **HTTP POST idempotency:** Require `Idempotency-Key` header; store hash(body) per user+route with 5‑minute TTL; on repeat, return prior response.
+* **Job idempotency:** Deterministic `jobId` based on semantic keys (e.g., `sha256(userId|broker|since|until)` for import).
+* **Rate‑limits:** Token‑bucket per IP and per user (as in v0.2); `Retry‑After` header; friendly UI copy on 429.
+
+### Consequences
+
+* Eliminates duplicate imports/sims; reduces load and surprises.
+* Slight Redis overhead for key tracking.
+
+### Alternatives considered
+
+* No idempotency header — rely on backend dedupe only (works for jobs but not safe for all POSTs).
+* Global IP‑only rate limit — unfair behind NATs.
+
+### Implementation notes
+
+* Middleware in BFF for headers; helpers for computing deterministic job ids; dashboards for 429 rates.
