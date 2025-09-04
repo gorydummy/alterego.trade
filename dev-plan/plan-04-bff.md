@@ -14,6 +14,39 @@
 
 > Design goal: keep Edge **stateless** and minimal. Security boundary + UX glue. All domain logic/data lives in S3 Core.
 
+
+
+## Recommended setup
+
+**separate deployables** (two services), but presented to the browser as **one origin** via routing.
+
+* **S1 Web-UI (Next.js)** = its own service (SSR/static, assets).
+* **S2 Edge/BFF (Express/Fastify)** = its own service (public REST, WebSockets, CSRF, idempotency, fan-out).
+
+Put a proxy/CDN (e.g., Cloudflare) in front so users hit a **single domain**, and route paths:
+
+* `/` → Next.js (S1)
+* `/api/*` → Edge/BFF (S2)
+* `/ws` → Edge/BFF (S2, WebSocket)
+
+This keeps:
+
+* **Clean separation of concerns** (UI vs. session/auth/WS logic).
+* **Independent scaling** (Edge can scale on connections; Next on SSR).
+* **Simpler security** (same-origin cookies; no CORS headaches).
+
+```mermaid
+flowchart LR
+  U[Browser] -->|"same origin https://app.example.com"| CDN[CDN/Proxy]
+  CDN -->|"root path /"| S1[Next.js (Web-UI)]
+  CDN -->|"/api/* & /ws"| S2[Edge/BFF (Express)]
+  S2 --> S3[Core API]
+```
+
+## Alternatives (when/why)
+
+* **Single app (embed BFF inside Next API routes)**: OK for a throwaway prototype; harder to scale WS separately later.
+* **Separate subdomains (app.example.com & edge.example.com)**: Works, but you must manage CORS and cookie `Domain=.example.com`.
 ---
 
 ## Architecture
