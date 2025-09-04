@@ -307,3 +307,110 @@
 ---
 
 *End of v0.2 Product Spec.* Ready to generate repo scaffolding and start implementing slice by slice with test‑first E2E where applicable.
+
+---
+
+## 19) Service Boundaries (DDD Modules) — carried from v0.1, clarified
+
+* **auth**: session lifecycle, password policy, CSRF, OAuth intents, token sealing/rotation, audit writes.
+
+  * Inputs: signup/login forms, OAuth callbacks.
+  * Outputs: `Session`, `BrokerConnection`, `Audit` rows.
+* **brokers**: adapter registry, OAuth/API‑key flows, paging, retry/backoff, dedupe.
+
+  * Inputs: `import.trades` jobs.
+  * Outputs: normalized `Trade[]`.
+* **trades**: repositories, time‑window queries, cursor pagination, idempotent writes, export.
+* **analytics**: indicator computation (via ML svc), feature assembly, bias scoring.
+
+  * Outputs: `BiasTag`, sparkline arrays, cached indicator blobs.
+* **coach**: LLM reflection orchestration, tone control, WS delivery, feedback capture.
+* **digest**: weekly aggregation, challenge suggestion, storage, WS notify.
+
+## 20) Coaching Loop (Realtime & Batch) — preserved from v0.1
+
+**Realtime**
+
+1. Import completes a page → features computed → `BiasTag` persisted.
+2. `coach.reflect` event enqueued → WS push to user with mini chart + buttons.
+3. User actions (open sim / change tone / add note) produce follow‑up events.
+
+**Batch**
+
+* Weekly `digest.weekly` collates counts by label, P/L attribution, streaks; persists `Digest` and sends `digest.ready`.
+
+## 21) Event Taxonomy & Payloads
+
+**coach.reflect**
+
+```json
+{
+  "type": "coach.reflect",
+  "eventId": "evt_abc",
+  "ts": "2025-09-04T02:00:00Z",
+  "tradeId": "t_123",
+  "labels": [{"name": "FOMO", "confidence": 0.82}],
+  "insight": "You bought after a +12% pump. Historically your spike entries underperform within 48h.",
+  "sparklines": {"actual": [101,99,98], "hold": [101,102,104]},
+  "tone": "supportive"
+}
+```
+
+**import.progress**
+
+```json
+{ "type": "import.progress", "eventId": "evt_def", "ts": "...", "jobId": "job_xyz", "percent": 64, "fetched": 320, "stored": 315 }
+```
+
+**digest.ready**
+
+```json
+{ "type": "digest.ready", "eventId": "evt_ghi", "ts": "...", "digestId": "d_789", "period": {"start": "2025-08-25", "end": "2025-08-31"} }
+```
+
+## 22) Rules Engine Schema (from v0.1 → v0.2)
+
+**Rule JSON**
+
+```json
+{
+  "kind": "avoidSpikeOverPct",
+  "params": { "pct": 10, "lookbackHours": 24 },
+  "active": true
+}
+```
+
+**Evaluation**
+
+* At import time, compute `pct_change_lookback` at entry. If `>= pct`, flag violation, create `Insight`, reset streak.
+* Future: support `minHoldHours`, `maxTradesPerDay`, `minRR`.
+
+## 23) LLM Prompt Template (v0.1 hardened)
+
+```
+System: You are a trading psychology coach. Never give financial advice; focus on behavior and habits.
+Style: {tone=supportive|strict}. Keep to 2 sentences; include exactly 1 actionable habit.
+Input:
+- Features: {compact_feature_json}
+- Bias: {label}
+Task: Explain the likely behavioral pattern and suggest a habit to reduce recurrence.
+Output JSON: { "text": string, "bias": string, "tone": string }
+```
+
+## 24) Appendix — v0.1 → v0.2 Crosswalk
+
+* **System Architecture** → §1 Architecture (Locked) ✅
+* **Domain Model (ERD)** → §2 Data Model (Prisma) ✅
+* **Broker Adapter Interface** → §5 Broker Adapter (Interface & Hardening) ✅
+* **Bias Tagging Pipeline** → §6 Bias Tagging (Heuristics/Personalization) ✅
+* **Coaching Loop (RT/Batch)** → §20 Coaching Loop ✅
+* **APIs (BFF)** → §3 API Surface (REST+WSS), §21 Event Taxonomy ✅
+* **Service Boundaries (DDD)** → §19 Service Boundaries ✅
+* **LLM Orchestration & Prompt** → §9 LLM Orchestration, §23 Prompt Template ✅
+* **Privacy/Security/Compliance** → §12 Security Posture ✅
+* **Observability & Quality** → §13 Observability & SLOs ✅
+* **Performance Targets** → §13 SLOs ✅
+* **Deployment & Infra** → §14 Deployment & Infra ✅
+* **Acceptance Criteria** → §16 Acceptance Criteria ✅
+
+(Everything from v0.1 is now explicitly carried forward and anchored to v0.2 sections.)
