@@ -1,341 +1,354 @@
-# AI Trading Twin — Development Plan per Stack (v0.2)
+# 01 — High-Level Development Plan 
 
-> Copy‑ready plan. Part A = high‑level per‑stack roadmap. Part B = **Stack 0: Data & ERD Foundation** with project structure + file‑by‑file pseudocode so we can implement and test granularly. Subsequent stacks will follow the same pattern.
+## Stacks & Responsibilities
+
+**S1 — Web-UI (Next.js)**
+
+* Chat (coach reflections), Dashboard, Digest, Rules/Settings.
+* Manages **session cookies only**; no direct DB access.
+* Opens a **WSS** to S2 for events: `coach.reflect`, `import.progress`, `digest.ready`.
+
+**S2 — Edge / BFF (Express)**
+
+* Public **facade**: sessions, CSRF, rate-limits, DTO validation, **idempotency**.
+* **No DB** access; proxies to S3 via **internal REST**.
+* Hosts **WS relay** with replay (`/events?since=…`).
+
+**S3 — Core API (Express)**
+
+* Owns **business logic & data** (Postgres/Redis/S3).
+* Exposes internal REST to S2; writes **Event Outbox**.
+* Enqueues background jobs.
+
+**S4 — Workers (BullMQ, Node)**
+
+* Jobs: `import.trades`, `score.bias`, `simulate.simple`, `digest.weekly`.
+* Read/write Postgres/Redis/S3; append **Event Outbox** rows.
+
+**S5 — AI Coach (FastAPI, Python)**
+
+* Indicators, heuristic bias helper, short NLG reflection.
+* **HMAC-signed** requests now; **mTLS** later.
+
+**Data Plane**
+
+* **Postgres** (Prisma): domains + `event_outbox` (monthly partitions).
+* **Redis**: cache + BullMQ queues.
+* **S3/MinIO**: OHLCV snapshots (reproducibility), exports.
+
+**Integrations**
+
+* **Broker APIs**: Coinbase OAuth (primary), Binance API-key (flag).
+* **Market Data**: broker first → vendor fallback (flag).
+
+## System Flow (Mermaid)
+
+```mermaid
+flowchart TB
+  subgraph Client["User Browser"]
+    UI["S1: Web-UI (Next.js)\nChat • Dashboard • Digest • Rules"]
+  end
+
+  subgraph Edge["S2: Edge/BFF (Express)"]
+    BFF["Auth • CSRF • Rate-limit • DTO • Idempotency\nWS Relay (replay supported)"]
+  end
+
+  subgraph Core["S3: Core API (Express)"]
+    API["Domain Services\nTrades • Bias • Rules • Digest\nEvent Outbox writer"]
+  end
+
+  subgraph Jobs["S4: Workers (BullMQ)"]
+    IMP["Import"]
+    SCORE["Bias Score"]
+    SIM["Simulation"]
+    DIG["Weekly Digest"]
+  end
+
+  subgraph AI["S5: AI Coach (FastAPI)"]
+    AIsvc["Indicators • Bias Helper • NLG\n(HMAC → mTLS)"]
+  end
+
+  subgraph Data["Data Plane"]
+    PG[("Postgres\n• Trades • BiasTag • Rule • Digest • EventOutbox")]
+    RDS[("Redis\n• Cache • BullMQ")]
+    S3[("S3/MinIO\n• Snapshots • Exports")]
+  end
+
+  subgraph Ext["Integrations"]
+    BRK["Broker APIs\n(Coinbase OAuth / Binance)"]
+    MKT["Market Data\n(Broker → Vendor fallback)"]
+  end
+
+  UI -- HTTPS --> BFF
+  UI <-. WSS .-> BFF
+
+  BFF -- Internal REST --> API
+  API -- SQL --> PG
+  API -- Cache --> RDS
+  API -- Snapshots --> S3
+
+  API -- enqueue --> RDS
+  IMP -. consume .-> RDS
+  SCORE -. consume .-> RDS
+  SIM -. consume .-> RDS
+  DIG -. consume .-> RDS
+
+  IMP -- fetch trades --> BRK
+  IMP -- upsert --> PG
+  IMP -- progress --> API
+  SCORE -- indicators/bias --> AIsvc
+  SCORE -- write BiasTag + Outbox --> PG
+  SIM -- OHLCV --> MKT
+  SIM -- cache --> RDS
+  DIG -- aggregate/write --> PG
+  DIG -- store report --> S3
+
+  API -- read EventOutbox --> PG
+  API -- push events --> BFF
+  BFF -- coach.reflect / import.progress / digest.ready --> UI
+```
+
+## Interfaces (Stable Contracts)
+
+**S1 ↔ S2 (public REST/WSS)**
+
+* REST: `/auth/*`, `/brokers/*`, `/trades/*`, `/simulations/simple`, `/digests/weekly/latest`, `/rules/*`, `/events?since=…`
+* WSS: `/ws/coach` → events `{ type, eventId, ts, v, payload }` (resume with `lastEventId`)
+
+**S2 ↔ S3 (internal REST)**
+
+* Mirrors public routes (no session mgmt); S2 forwards `userId` context.
+
+**S3 ↔ S4 (queues)**
+
+* `q_import`, `q_score`, `q_sim`, `q_digest` (deterministic `jobId`, retries, DLQ).
+
+**S3/S4 ↔ S5 (HTTP)**
+
+* `POST /v1/indicators`, `/v1/bias/score`, `/v1/nlg/reflect` with **HMAC** headers.
+
+## Delivery Sequence (Thin Vertical Slices)
+
+1. Security base (S2 auth/session/CSRF/headers) + S1 shell
+2. Coinbase connect (OAuth via S2 → S3; audit)
+3. Import 30d (S1 → S2 → S3 enqueue → S4 import + `import.progress`)
+4. Bias tags + reflections (S4 score → outbox → S2 WSS → S1 chat)
+5. Simulations (S1 CTA → S2 → S3/S4; Redis cache)
+6. Weekly digest (S4 cron → outbox → S1 digest)
+7. Rules & streaks (settings + evaluation)
+8. Export/Delete + privacy copy
+9. Perf/observability polish + SLO checks
+
+## Quality Gates (CI)
+
+* Unit + contract tests on PR; full integration/E2E on main.
+* SAST (CodeQL), dependency/image scans (Trivy).
+* Block deploy if: headers missing, SLO probes red, or “Must” E2E fail.
 
 ---
 
-## Part A — High‑Level Plan by Stack
+# 02 — Data & ERD (Canonical Entities + Constraints)
 
-### 1) Web App (Next.js, Tailwind, Zustand)
+> Field names are **authoritative** across S1–S5. Keep identical in DTOs/ORM.
 
-**Goal:** Desktop UI for chat (coach reflections), dashboard, digest, rules; secure session; WSS client + resume.
+## Entities
 
-* **Milestones:**
+**User**
 
-  * M1 Shell: layout, routing, auth guard, secure cookie checks.
-  * M2 Chat MVP: render `coach.reflect`, CTA → simulation modal, `lastEventId` resume.
-  * M3 Dashboard: bias timeline, tagged trades grid.
-  * M4 Digest: weekly card + detail view.
-  * M5 Settings: rules create/toggle; export/delete flows.
-* **Testing:** Vitest components; Playwright E2E; DTO contract checks.
+* `id` (cuid, PK)
+* `email` (unique)
+* `passwordHash` (Argon2id)
+* `createdAt` (timestamptz)
 
-### 2) BFF/API (Fastify, Prisma, BullMQ, WebSocket)
+**Session**
 
-**Goal:** Auth, broker connect, import pipeline, bias scoring orchestration, simulations, WS fan‑out.
+* `id` (cuid, PK)
+* `userId` (FK → User)
+* `createdAt`, `expiresAt` (timestamptz)
+* `ipHash` (sha256(IP+pepper)), `uaHash` (nullable)
 
-* **Milestones:**
+**BrokerConnection**
 
-  * M1 Security base: sessions (HttpOnly), CSRF, headers, rate‑limit, audits.
-  * M2 Broker connect (Coinbase OAuth): state/PKCE, encrypted tokens.
-  * M3 Import endpoint + job enqueue + progress events.
-  * M4 Bias scoring orchestrator → `BiasTag` + outbox event.
-  * M5 Simulations endpoint + caching.
-  * M6 Weekly digest cron + event.
-* **Testing:** Unit (services/repos), integration (Testcontainers PG/Redis), Pact/DTO schema tests.
+* `id` (cuid, PK), `userId` (FK → User)
+* `broker` (`coinbase` | `binance` | …)
+* `status` (`active`|`paused`|`revoked`)
+* `accessEnc` (bytes, AES-GCM), `refreshEnc` (bytes, nullable)
+* `scope` (string), `expiresAt` (nullable), `createdAt`
 
-### 3) Workers / Queue Layer (BullMQ)
+**Trade**
 
-**Goal:** Reliable background processing with idempotency, retries, metrics.
+* `id` (cuid, PK), `userId` (FK → User)
+* `broker` (string), `extId` (broker trade id)
+* `symbol` (string), `side` (`BUY`|`SELL`)
+* `qty` (decimal), `price` (decimal), `fee` (decimal, nullable)
+* `ts` (timestamptz)
+* **Constraint**: `UNIQUE (userId, broker, extId)`
 
-* **Queues:** `q_import`, `q_score`, `q_sim`, `q_digest`.
-* **Milestones:**
+**BiasTag**
 
-  * M1 Queue boot + shared job base (logging, retry, metrics).
-  * M2 Import worker: page fetch, normalize, dedupe, progress.
-  * M3 Score worker: features → heuristics → tags + outbox.
-  * M4 Sim worker: hold vs actual; cache; vendor 429 backoff.
-  * M5 Digest worker: aggregate, store, event.
-* **Testing:** Unit for handlers (fixtures), integration with Redis; failure/retry cases.
+* `id` (cuid, PK), `tradeId` (FK → Trade)
+* `label` (`FOMO`|`PANIC`|`DISCIPLINE`|…)
+* `confidence` (float 0..1)
+* `features` (jsonb; compact feature summary)
+* `createdAt` (timestamptz)
 
-### 4) Python ML Service (FastAPI)
+**Rule**
 
-**Goal:** Deterministic indicators, heuristic bias helper, concise NLG reflection helper.
+* `id` (cuid, PK), `userId` (FK → User)
+* `kind` (e.g., `avoidSpikeOverPct`)
+* `params` (jsonb; e.g., `{ pct: 10, lookbackHours: 24 }`)
+* `active` (boolean, default true)
 
-* **Endpoints:** `/v1/indicators`, `/v1/bias/score`, `/v1/nlg/reflect`.
-* **Milestones:**
+**Digest**
 
-  * M1 Indicators: RSI/ATR/BB/MA (vectorized) + tests.
-  * M2 Heuristic scorer parity with BFF thresholds.
-  * M3 NLG helper (short coach text, JSON mode).
-* **Testing:** Pytest numerics; schema tests; HMAC verification; perf checks.
+* `id` (cuid, PK), `userId` (FK → User)
+* `periodStart` (date), `periodEnd` (date)
+* `payload` (jsonb; counts by bias, P/L attribution, streaks, suggestion)
+* `deliveredAt` (timestamptz, nullable)
 
-### 5) Broker Adapters (Coinbase primary; Binance behind flag)
+**Audit**
 
-**Goal:** Read‑only trade import; OAuth/API‑key flows; normalization.
+* `id` (cuid, PK), `userId` (FK → User)
+* `action` (`login`, `broker_linked`, `import_start`, `import_done`, …)
+* `meta` (jsonb), `createdAt` (timestamptz)
 
-* **Milestones:**
+**EventOutbox**
 
-  * M1 Adapter interface + shape tests; OAuth intent cache.
-  * M2 Coinbase: OAuth, pagination, extId dedupe.
-  * M3 Binance (flag): API‑key mapping parity.
-* **Testing:** Stub servers + fixtures; contract tests; backoff behavior.
+* `id` (ULID, PK), `userId` (FK → User)
+* `type` (`coach.reflect` | `import.progress` | `digest.ready`)
+* `v` (smallint, schema version)
+* `ts` (timestamptz; **monthly partition key**)
+* `payload` (jsonb)
+* `deliveredAt` (timestamptz, nullable)
 
-### 6) Market Data Adapter
+## ERD (Mermaid)
 
-**Goal:** OHLCV source selection (broker first, vendor fallback), caching, S3 snapshots.
+```mermaid
+erDiagram
+  User ||--o{ Session : has
+  User ||--o{ BrokerConnection : links
+  User ||--o{ Trade : owns
+  Trade ||--o{ BiasTag : gets
+  User ||--o{ Rule : configures
+  User ||--o{ Digest : receives
+  User ||--o{ Audit : generates
+  User ||--o{ EventOutbox : emits
 
-* **Milestones:**
+  User {
+    string id PK
+    string email
+    string passwordHash
+    timestamptz createdAt
+  }
 
-  * M1 Adapter interface; Redis cache (symbol/granularity/window).
-  * M2 Broker OHLCV; graceful gaps.
-  * M3 Vendor fallback (flag) + weekly S3 snapshots for reproducibility.
-* **Testing:** Deterministic fixtures; cache hit/miss; throttle simulation.
+  Session {
+    string id PK
+    string userId FK
+    timestamptz createdAt
+    timestamptz expiresAt
+    string ipHash
+    string uaHash
+  }
 
-### 7) Data Layer & Migrations (Prisma, Postgres)
+  BrokerConnection {
+    string id PK
+    string userId FK
+    string broker
+    string status
+    bytes accessEnc
+    bytes refreshEnc
+    string scope
+    timestamptz expiresAt
+    timestamptz createdAt
+  }
 
-**Goal:** Schemas, migrations, indexes, seed scripts, event outbox partitions.
+  Trade {
+    string id PK
+    string userId FK
+    string broker
+    string extId
+    string symbol
+    string side
+    decimal qty
+    decimal price
+    decimal fee
+    timestamptz ts
+  }
 
-* **Milestones:**
+  BiasTag {
+    string id PK
+    string tradeId FK
+    string label
+    float confidence
+    jsonb features
+    timestamptz createdAt
+  }
 
-  * M1 Core models: `User`, `Session`, `BrokerConnection`, `Trade`.
-  * M2 `BiasTag`, `Rule`, `Digest`, `Audit`, `event_outbox` (partitioned).
-  * M3 Seeds: demo user, trade fixtures, OHLCV seeds.
-* **Testing:** Migration tests; query perf on 1k–10k trades; retention tests.
+  Rule {
+    string id PK
+    string userId FK
+    string kind
+    jsonb params
+    boolean active
+  }
 
-### 8) Security & Compliance
+  Digest {
+    string id PK
+    string userId FK
+    date periodStart
+    date periodEnd
+    jsonb payload
+    timestamptz deliveredAt
+  }
 
-**Goal:** Production‑ready by default.
+  Audit {
+    string id PK
+    string userId FK
+    string action
+    jsonb meta
+    timestamptz createdAt
+  }
 
-* **Milestones:**
+  EventOutbox {
+    string id PK
+    string userId FK
+    string type
+    smallint v
+    timestamptz ts
+    jsonb payload
+    timestamptz deliveredAt
+  }
+```
 
-  * M1 Headers (CSP/HSTS/etc), CSRF, session fixation prevention, Argon2id.
-  * M2 Token sealing (AES‑GCM; DEK via KMS), breach checks.
-  * M3 Export/delete; audit trails; privacy copy.
-* **Testing:** Header checks; cookie flags; encryption round‑trip; delete/export E2E.
+## Indices & Constraints
 
-### 9) Observability & Ops
+* `Trade UNIQUE(userId, broker, extId)`
+* Indexes:
 
-**Goal:** Visibility + SLO proof.
+  * `Trade(userId, ts)`, `Trade(symbol)`
+  * `BiasTag(tradeId)`
+  * `Digest(userId, periodEnd)`
+  * `EventOutbox(userId, ts)` (monthly partitions on `ts`)
 
-* **Milestones:**
+## Data Lifecycle
 
-  * M1 Pino JSON + request IDs; structured Python logs.
-  * M2 Prometheus exporters; Grafana queues/WS/import dashboards.
-  * M3 OpenTelemetry traces; alert rules.
-* **Testing:** Synthetic probes; chaos tests (kill ML → retries/alerts).
+* **Tokens:** `accessEnc`/`refreshEnc` sealed with AES-GCM (per-tenant DEK; KEK via KMS).
+* **Events:** `EventOutbox` retained 90 days; monthly partitions pruned.
+* **Digests:** keep 6 months in Postgres; older archived to S3 as JSON.
+* **Exports:** generated to S3; signed URL with short TTL.
+* **Deletion:** hard-delete tokens & sessions; (optional) soft-delete trades if adopted and stated in privacy copy.
 
-### 10) Testing & QA
+## Field Sensitivity
 
-**Goal:** Confidence with speed.
-
-* **Milestones:**
-
-  * M1 Unit scaffold; DTO/contract tests; broker stub service.
-  * M2 Integration (Testcontainers) for import→score path.
-  * M3 Playwright E2E: Must scenarios; 429 UX; WS reconnect/replay.
-* **Done:** CI gates enforce PR (unit+contracts) and main (full suite); SAST/Trivy/CodeQL clean.
+| Entity.Field           | Sensitivity  | Notes                                       |
+| ---------------------- | ------------ | ------------------------------------------- |
+| User.email             | PII          | Never exposed publicly; hash in logs        |
+| BrokerConnection.\*Enc | Secret       | AES-GCM sealed; never logged                |
+| Session.ipHash/uaHash  | Pseudonymous | Derived; raw IP/UA not stored               |
+| Trade.price/qty/fee    | Financial    | Needed for analytics; export/delete covered |
+| BiasTag.features       | Low          | Keep compact; no PII                        |
+| EventOutbox.payload    | Low/Med      | Avoid tokens/PII                            |
 
 ---
 
-## Part B — Stack 0: Data & ERD Foundation (Project Structure + Pseudocode)
-
-### B.1 Canonical Entities & Fields (consistent across all stacks)
-
-```
-User(id, email, passwordHash, createdAt)
-Session(id, userId, createdAt, expiresAt, ipHash, uaHash?)
-BrokerConnection(id, userId, broker, status, accessEnc, refreshEnc?, scope, expiresAt?, createdAt)
-Trade(id, userId, broker, extId, symbol, side, qty, price, fee?, ts)
-BiasTag(id, tradeId, label, confidence, features(json), createdAt)
-Rule(id, userId, kind, params(json), active)
-Digest(id, userId, periodStart, periodEnd, payload(json), deliveredAt?)
-Audit(id, userId, action, meta(json), createdAt)
-EventOutbox(id, userId, type, v, ts, payload(json), deliveredAt?)
-```
-
-**Indexes & constraints**
-
-* `Trade UNIQUE(userId, broker, extId)`; `Trade(userId, ts)`; `BiasTag(tradeId)`; `Digest(userId, periodEnd)`.
-* Partition `EventOutbox` by month on `ts`.
-
-### B.2 ASCII ERD
-
-```
-User 1───* Session
-  │
-  ├───* BrokerConnection
-  │
-  ├───* Trade 1───* BiasTag
-  │
-  ├───* Rule
-  │
-  ├───* Digest
-  │
-  └───* Audit
-
-EventOutbox (*userId) ──(events for UI replay; not a UI entity)
-```
-
-### B.3 Repo Structure (data‑centric parts)
-
-```
-repo/
-  apps/
-    bff/
-      src/
-        modules/
-          trades/
-            TradeRepo.ts
-            TradeService.ts
-          biases/
-            BiasRepo.ts
-          rules/
-            RuleRepo.ts
-          digest/
-            DigestRepo.ts
-          events/
-            OutboxRepo.ts
-        lib/
-          db.ts (Prisma client)
-          crypto/
-            keyring.ts (KMS/DEK unwrap)
-            tokenSeal.ts (AES‑GCM, encode/decode)
-  packages/
-    shared/
-      src/dto/
-        trade.ts, bias.ts, simulation.ts, event.ts (Zod)
-  prisma/
-    schema.prisma
-    migrations/
-    seeds/
-      seedTrades.ts
-      seedOHLCV.json
-```
-
-### B.4 Key Files — Pseudocode
-
-#### prisma/schema.prisma (excerpt)
-
-```prisma
-model Trade {
-  id       String   @id @default(cuid())
-  userId   String   @index
-  broker   String
-  extId    String
-  symbol   String   @index
-  side     String
-  qty      Decimal
-  price    Decimal
-  fee      Decimal?
-  ts       DateTime @index
-  @@unique([userId, broker, extId])
-}
-
-model BiasTag {
-  id         String   @id @default(cuid())
-  tradeId    String   @index
-  label      String
-  confidence Float
-  features   Json
-  createdAt  DateTime @default(now())
-}
-
-model EventOutbox {
-  id          String   @id // ULID
-  userId      String   @index
-  type        String
-  v           Int      @default(1)
-  ts          DateTime @default(now()) @index
-  payload     Json
-  deliveredAt DateTime?
-  @@index([userId, ts])
-}
-```
-
-#### apps/bff/src/modules/trades/TradeRepo.ts
-
-```ts
-export class TradeRepo {
-  constructor(private prisma: PrismaClient) {}
-
-  async upsertMany(userId: string, items: TradeDto[]): Promise<number> {
-    // idempotent by (userId, broker, extId)
-    // use prisma.$transaction with upsert or onConflict DO NOTHING via raw query for speed
-  }
-
-  async list(userId: string, since?: Date, until?: Date, cursor?: string, limit = 100) {
-    // cursor pagination by ts,id
-  }
-}
-```
-
-#### apps/bff/src/modules/biases/BiasRepo.ts
-
-```ts
-export class BiasRepo {
-  constructor(private prisma: PrismaClient) {}
-  async create(tag: BiasTagDto) { /* insert */ }
-  async listByTrade(tradeId: string) { /* query */ }
-}
-```
-
-#### apps/bff/src/modules/events/OutboxRepo.ts
-
-```ts
-export class OutboxRepo {
-  constructor(private prisma: PrismaClient) {}
-  async append(userId: string, type: string, payload: unknown, v = 1) {
-    // insert ULID id, now(), payload JSON
-  }
-  async listSince(userId: string, eventId: string) { /* ordered by ts asc */ }
-  async markDelivered(ids: string[]) { /* set deliveredAt */ }
-}
-```
-
-#### apps/bff/src/lib/crypto/keyring.ts
-
-```ts
-// unwrap per-tenant DEK via KMS; cache in memory with rotation TTL
-export async function getDEK(): Promise<CryptoKey> { /* KMS call / cache */ }
-```
-
-#### apps/bff/src/lib/crypto/tokenSeal.ts
-
-```ts
-export async function sealToken(plaintext: string): Promise<Buffer> { /* AES-GCM( DEK, nonce, aad ) */ }
-export async function openToken(cipher: Buffer): Promise<string> { /* verify tag; throw on fail */ }
-```
-
-#### apps/bff/src/modules/digest/DigestRepo.ts
-
-```ts
-export class DigestRepo {
-  async upsertLatest(userId: string, period: {start: Date, end: Date}, payload: any) { /*...*/ }
-  async latest(userId: string) { /*...*/ }
-}
-```
-
-### B.5 Unit Test Hooks (data layer)
-
-```
-apps/bff/test/
-  tradeRepo.test.ts       # upsertMany dedupe, cursor paging
-  biasRepo.test.ts        # insert/list
-  outboxRepo.test.ts      # append/listSince ordering
-  tokenSeal.test.ts       # seal/open round-trip, tamper fails
-  migrations.test.ts      # ensure schema up
-```
-
-### B.6 Migration & Seed Scripts (sketch)
-
-#### prisma/migrations/\*/migration.sql
-
-* Create tables & indexes per entities; monthly partitions for `EventOutbox`.
-
-#### prisma/seeds/seedTrades.ts
-
-```ts
-// load OHLCV from seedOHLCV.json
-// create demo user → insert trades across 30 days with a few spikes/dips
-```
-
-### B.7 Notes & Gotchas
-
-* Use `Decimal` for money fields; format at UI, not DB.
-* All timestamps in UTC; store ISO at API boundaries; convert for chart labels on client.
-* Keep `features` in `BiasTag` small (only what’s needed for explainability + prompt).
-* Add FK constraints where safe; workers may do high‑volume inserts → batch in transactions.
-
----
-
-**Next:** If this looks good, I’ll produce **Part C — Stack 1: BFF/API** with its own project structure tree, file‑by‑file pseudocode (routes, services, WS relay, middlewares), and test entry points. We'll reuse the entities above verbatim.
+If you want any naming/field tweaks, tell me and I’ll adjust before we dive into the per-stack docs.
