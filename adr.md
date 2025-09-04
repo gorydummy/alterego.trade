@@ -286,3 +286,116 @@ Imports/simulations can be re‑triggered by users or retries. We need consisten
 ### Implementation notes
 
 * Middleware in BFF for headers; helpers for computing deterministic job ids; dashboards for 429 rates.
+
+---
+
+## ADR‑008 — Deployment Topology (VM w/ Docker vs Kubernetes)
+
+**Status:** Accepted
+
+### Context
+
+We need a production‑ready deployment that is secure, observable, and simple for a small team. MVP comprises Web (Next.js), BFF (Fastify), ML (FastAPI), Postgres, Redis, and object storage. Traffic is modest; reliability matters.
+
+### Decision
+
+**Phase 1 (MVP): Single VM (staging + prod split) with Dockerized services behind a hardened reverse proxy.**
+
+* Reverse proxy: **Caddy** (auto‑TLS, HSTS preload, HTTP/2, OCSP stapling) or NGINX if team prefers.
+* Processes: BFF, Web, ML as separate containers; Postgres/Redis as managed services if available (preferred), else containers with daily backups.
+* Process supervision: systemd per compose stack (or `docker compose` via systemd unit) with healthcheck restarts.
+* Blue/green: deploy to a new container group, wait for health, then switch.
+
+**Phase 2 (scale):** Evaluate **Kubernetes** (EKS/GKE) once we need horizontal scaling, zero‑downtime migrations, and automated cert/secret rotation at scale.
+
+### Consequences
+
+* Faster to stand up, fewer moving parts.
+* Clear migration path to K8s without rewriting apps.
+* Requires solid backups, monitoring, and OS patching discipline on VM.
+
+### Alternatives considered
+
+* App platform (Fly/Render/DO Apps): easy but less control over mTLS and private networking.
+* K8s now: overkill for MVP; operational burden.
+
+### Implementation notes
+
+* Harden SSH (keys only), fail2ban, unattended‑upgrades, minimal base AMI.
+* Non‑root containers, read‑only FS where feasible, seccomp profiles.
+* Caddy/NGINX sets CSP/HSTS headers; proxy only HTTPS; WSS upgrade allowed to `/ws/coach`.
+
+---
+
+## ADR‑009 — Secrets Management & Encryption Keys
+
+**Status:** Accepted
+
+### Context
+
+We handle broker tokens and session secrets. We need secure storage, rotation, and encryption for data‑at‑rest keys.
+
+### Decision
+
+* **Application secrets (env):** Use a **managed secrets service** (e.g., AWS SSM Parameter Store or 1Password Secrets Automation / Doppler). CI pulls secrets at deploy time; never commit to repo.
+* **Data encryption keys:** **Envelope encryption**: generate per‑tenant data encryption keys (DEKs) for token sealing; encrypt each DEK with **cloud KMS** (KEK). Store encrypted DEK alongside app config; decrypt at boot.
+* **At rest:** Broker tokens sealed with AES‑256‑GCM using DEK; nonces are random per record; auth tag verified on each read.
+* **Rotation:** Rotate DEKs annually or on incident; re‑seal tokens in background; rotate KEKs via KMS policy.
+* **Local/dev:** `sops + age` for `.env` templates; developer keys outside repo.
+
+### Consequences
+
+* Strong protection of tokens and secrets; auditable access via KMS logs.
+* Slight boot complexity (DEK unwrap); background rotation job required for re‑sealing.
+
+### Alternatives considered
+
+* HashiCorp Vault: powerful but heavy to operate for MVP.
+* Plain env files: insufficient for production.
+
+### Implementation notes
+
+* Add `Keyring` module (wrap/unwrap), `kms` client, and `TokenSeal` util.
+* CI: pull secrets -> render env -> deploy -> smoke test; never echo secrets in logs.
+
+---
+
+## ADR‑010 — Testing Strategy & Quality Gates
+
+**Status:** Accepted
+
+### Context
+
+We want confidence without slowing iteration. The system spans web UI, API, jobs, and a Python service.
+
+### Decision
+
+Adopt a **testing pyramid** with explicit gates:
+
+* **Unit tests**:  fast, isolated.
+
+  * Web: React components/hooks with Vitest.
+  * BFF: service and repository tests with Jest/Vitest; Zod validations.
+  * ML: Pytest for indicators and bias scoring helpers.
+* **Contract tests**:  Pact or OpenAPI schema tests between Web ↔ BFF and BFF ↔ ML (JSON schemas).
+* **Integration tests**:  spin up BFF with Postgres/Redis (Testcontainers) to validate import/score pipelines.
+* **E2E**:  Playwright against broker **stub** service; scenarios from Product Spec §9.
+* **Security checks**:  ESLint, TypeScript strict, Bandit/flake8 for Python, `npm audit`, Trivy image scan, CodeQL SAST, dependency review.
+* **Performance smoke**:  import 1k trades fixture within SLO on CI runner.
+
+**Quality gates in CI**
+
+* Fail build on any P0/P1 test failure, schema drift, or SAST criticals.
+* Require green **E2E Must** scenarios to deploy to staging.
+* Block prod deploy if SLO probes fail or migration is unsafe.
+
+### Consequences
+
+* Predictable confidence; fast feedback for most changes.
+* Slightly longer CI times due to E2E + containers; acceptable for MVP.
+
+### Implementation notes
+
+* Set up Testcontainers for Postgres/Redis in Node and Python.
+* Provide broker stub images and seed fixtures.
+* Tag tests by level; run unit + contracts on PR, full suite on merge to main.
