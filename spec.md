@@ -414,3 +414,182 @@ Output JSON: { "text": string, "bias": string, "tone": string }
 * **Acceptance Criteria** → §16 Acceptance Criteria ✅
 
 (Everything from v0.1 is now explicitly carried forward and anchored to v0.2 sections.)
+
+---
+
+## 25) Event Taxonomy — Rationale, Usage, and Feature Mapping
+
+**Why events?** To decouple work that happens at different cadences (imports/batch scoring) from UI responsiveness, while guaranteeing recoverability (resume from `lastEventId`).
+
+**Where used?**
+
+* **Server → Client (WSS):** deliver user‑visible moments (reflections, import progress, digest availability).
+* **Server → Server (Queues):** compose long‑running jobs without blocking HTTP.
+
+**Related features:** Chat reflections, import progress bar, weekly digest card, tone/feedback interactions, simulation openers.
+
+### 25.1 Event Catalog (UI‑facing, WSS)
+
+| Event             | Produced by            | Consumed by            | Trigger                       | Persistence                                              | Why it exists                                                                |
+| ----------------- | ---------------------- | ---------------------- | ----------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `coach.reflect`   | `score.bias` worker    | Chat UI                | New/updated `BiasTag`         | DB row (`BiasTag`) + append‑only event log (Redis or DB) | Tells the user *why* a trade matched a pattern, enabling immediate learning. |
+| `import.progress` | `import.trades` worker | Import banner/progress | Each page or % increment      | Ephemeral in Redis (TTL \~15m)                           | Keeps UI honest about long imports; supports cancel/retry UX.                |
+| `digest.ready`    | `digest.weekly` worker | Digest card            | Weekly aggregation completion | `Digest` row + event log                                 | Drives weekly habit reflection without polling.                              |
+
+**Versioning & schema evolution**
+
+* Each payload includes `type`, `eventId`, `ts`, and **`v`** (schema version). Bump `v` on additive changes; never break required fields.
+* Client stores `lastEventId` and requests missed items on reconnect via `/api/events?since=lastEventId`.
+
+**Delivery semantics**
+
+* At‑least‑once: UI must be idempotent by `eventId`.
+* Backpressure: bounded queue per socket; if overflow, send `synced=false` hint so UI fetches backlog.
+
+### 25.2 Sequences (text diagrams)
+
+**A) Import → Reflect**
+
+```
+UI: POST /api/trades/import → 202 (jobId)
+Worker(import): fetch page → normalize → upsert trades → emit progress
+Worker(score): for each new trade → compute features → create BiasTag → enqueue coach.reflect
+WS: push coach.reflect → UI renders chat bubble + CTAs
+```
+
+**B) Open Simulation**
+
+```
+UI: click "Open Simulation"
+API: POST /api/simulations/simple → compute hold vs actual (cache)
+UI: render two curves + delta; optionally persist an Insight
+```
+
+**C) Weekly Digest**
+
+```
+Cron: enqueue digest.weekly
+Worker(digest): aggregate → persist Digest → enqueue digest.ready
+WS: push digest.ready → UI shows card; GET /api/digests/weekly/latest for details
+```
+
+**Operational metrics**
+
+* Count and latency per event type; dropped/overflow counts; reconnects/min; backlog size on resume. These directly map to SLOs.
+
+---
+
+## 26) Rules Engine — Rationale, Usage, and Feature Mapping
+
+**Why rules?** Users need *pre‑commit guardrails* that target their personal failure modes (e.g., “I FOMO when price jumped >10% today”). Rules turn insights into **behavior change levers**.
+
+**Where used?**
+
+* **Evaluation points:** during import/scoring (batch) and at *pre‑trade hint* time (future live mode). MVP uses import/scoring.
+* **Storage/UI:** `Rule` table; simple form in Settings; chips on Dashboard; streaks in Digest.
+
+**Related features:** Streak tracking, insights feed, digest “challenge”, coach tone (“strict” can remind rules).
+
+### 26.1 Rule Schema & Enforcement
+
+* Schema (per v0.2 §22). Each rule has `kind`, `params`, `active`.
+* **Evaluation** (MVP): when a trade is processed, compute required features. If rule violated → create an `Insight` (`kind: rule.violation`) and reset streak.
+* **Idempotency:** violations keyed by `(ruleId, tradeId)`.
+* **Rate‑limit:** surface ≤1 reminder per rule per 10 minutes over WSS to avoid spam.
+
+**Example**
+
+```json
+{
+  "kind": "avoidSpikeOverPct",
+  "params": { "pct": 10, "lookbackHours": 24 }
+}
+```
+
+Violation condition: `pct_change_24h_before >= 10` AND `side = BUY`.
+
+**UI surfaces**
+
+* Dashboard: rule chips + on/off toggle.
+* Chat: when a violating trade appears, the reflection adds a compact reminder and a button: “Create alert instead”.
+* Digest: shows streaks and suggests one rule to (re)enable.
+
+**Future**
+
+* **Pre‑trade hinting:** if we ingest live order intents later, rules can warn before execution.
+* **Composability:** AND/OR groups with caps (e.g., `maxTradesPerDay`).
+
+---
+
+## 27) Bias Tagging — Why/Where/Features
+
+**Why?** Clear, explainable labels make the psychology mirror tangible. Without tags, coaching is generic.
+
+**Where?**
+
+* Created by `score.bias` worker; stored in `BiasTag`; consumed by Chat (reflections), Dashboard (bias timeline), Digest (counts), and Rules (which may reference features used here).
+
+**Related features:** Chat reflection text, bias radar, digest P/L attribution.
+
+**Notes**
+
+* Persist `features` JSON for auditability and reproducibility of advice.
+* Personalization tweaks rule thresholds over time (stored in `Rule.params`).
+
+---
+
+## 28) Simulation — Why/Where/Features
+
+**Why?** Counterfactuals close the feedback loop (“what if I’d waited/held?”) and create *learning moments* that change behavior.
+
+**Where?** Invoked from Chat CTA; results appear inline and in a lateral panel; data cached in Redis.
+
+**Related features:** Chat coaching, Digest (can cite aggregate delta), potential shareable weekly report.
+
+**Reliability**
+
+* Deterministic given OHLCV set; cache by `(userId, tradeId, horizonDays)`; include vendor source in cache key.
+
+---
+
+## 29) Digest — Why/Where/Features
+
+**Why?** Weekly cadence is ideal for habit formation; it aggregates noisy daily behavior into clear patterns and a single action.
+
+**Where?** Generated by `digest.weekly` worker; persisted in `Digest`; surfaced via `digest.ready` and the Digest screen.
+
+**Related features:** Streaks, suggested rule, bias counts, simple P/L attribution.
+
+**Retention**
+
+* Keep 6 months (configurable); older digests archived to S3 as JSON for export.
+
+---
+
+## 30) “Where Used” Matrix (Entities → Surfaces)
+
+| Entity  | API                          | WS Events              | UI                                        | Jobs                      |
+| ------- | ---------------------------- | ---------------------- | ----------------------------------------- | ------------------------- |
+| Trade   | `/api/trades*`               | (indirect via reflect) | Chat cards, Dashboard timeline            | import.trades             |
+| BiasTag | `/api/trades/:id/bias`       | `coach.reflect`        | Chat reflection, Dashboard radar/timeline | score.bias                |
+| Rule    | `/api/rules*`                | (n/a)                  | Settings chips, Digest streaks            | evaluated in score/import |
+| Digest  | `/api/digests/weekly/latest` | `digest.ready`         | Digest screen/card                        | digest.weekly             |
+| Audit   | (internal)                   | (n/a)                  | Admin/ops tools                           | any action                |
+
+---
+
+## 31) Security Items — Why each matters (quick map)
+
+* **CSP/HSTS/Referrer‑Policy/Permissions‑Policy**: mitigate XSS/SSL stripping/data leakage by default.
+* **CSRF (double submit)**: cookie sessions require anti‑CSRF to block cross‑site POSTs.
+* **Token encryption (AES‑GCM)**: broker tokens are the highest‑value secret; must be sealed individually.
+* **At‑least‑once events + resume**: users shouldn’t miss reflections; ensures trust in coaching history.
+* **Audit log**: forensic trail for auth and data access; supports delete/export compliance.
+
+---
+
+## 32) Open Qs (focused on these sections)
+
+* Rules: expose 2–3 defaults on first run (recommended presets) or start empty?
+* Events: store event log in Redis Streams or Postgres table? (Trade‑off: speed vs retention.)
+* Digest: one challenge per week or allow 2+ micro‑challenges when multiple biases dominate?
