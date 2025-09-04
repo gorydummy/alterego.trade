@@ -46,15 +46,15 @@
 ```mermaid
 flowchart TB
   subgraph Client["User Browser"]
-    UI["S1: Web-UI (Next.js)\nChat • Dashboard • Digest • Rules"]
+    UI["S1: Web-UI (Next.js)<br>Chat • Dashboard • Digest • Rules"]
   end
 
   subgraph Edge["S2: Edge/BFF (Express)"]
-    BFF["Auth • CSRF • Rate-limit • DTO • Idempotency\nWS Relay (replay supported)"]
+    BFF["Auth • CSRF • Rate-limit • DTO • Idempotency<br>WS Relay (replay supported)"]
   end
 
   subgraph Core["S3: Core API (Express)"]
-    API["Domain Services\nTrades • Bias • Rules • Digest\nEvent Outbox writer"]
+    API["Domain Services<br>Trades • Bias • Rules • Digest<br>Event Outbox writer"]
   end
 
   subgraph Jobs["S4: Workers (BullMQ)"]
@@ -65,18 +65,18 @@ flowchart TB
   end
 
   subgraph AI["S5: AI Coach (FastAPI)"]
-    AIsvc["Indicators • Bias Helper • NLG\n(HMAC → mTLS)"]
+    AIsvc["Indicators • Bias Helper • NLG<br>(HMAC → mTLS)"]
   end
 
   subgraph Data["Data Plane"]
-    PG[("Postgres\n• Trades • BiasTag • Rule • Digest • EventOutbox")]
-    RDS[("Redis\n• Cache • BullMQ")]
-    S3[("S3/MinIO\n• Snapshots • Exports")]
+    PG[("Postgres<br>• Trades • BiasTag • Rule • Digest • EventOutbox")]
+    RDS[("Redis<br>• Cache • BullMQ")]
+    S3[("S3/MinIO<br>• Snapshots • Exports")]
   end
 
   subgraph Ext["Integrations"]
-    BRK["Broker APIs\n(Coinbase OAuth / Binance)"]
-    MKT["Market Data\n(Broker → Vendor fallback)"]
+    BRK["Broker APIs<br>(Coinbase OAuth / Binance)"]
+    MKT["Market Data<br>(Broker → Vendor fallback)"]
   end
 
   UI -- HTTPS --> BFF
