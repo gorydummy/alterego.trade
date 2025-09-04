@@ -84,7 +84,8 @@ sequenceDiagram
   C->>W: enqueue q_import(jobId=hash(userId|since))
   W-->>C: progress events -> EventOutbox(type=import.progress)
   W-->>C: BiasTag insert -> EventOutbox(type=coach.reflect)
-  C-->>E: SSE stream emits events; Edge fans out to WS clients
+  C-->>E: SSE stream emits events
+  C-->>E: Edge fans out to WS clients
 ```
 
 **C) Replay (backfill)**
