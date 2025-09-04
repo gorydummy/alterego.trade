@@ -37,9 +37,9 @@ This keeps:
 
 ```mermaid
 flowchart LR
-  U[Browser] -->|"same origin https://app.example.com"| CDN[CDN/Proxy]
-  CDN -->|"root path /"| S1[Next.js (Web-UI)]
-  CDN -->|"/api/* & /ws"| S2[Edge/BFF (Express)]
+  U[Browser] -->|"same origin"| CDN[CDN/Proxy]
+  CDN -->|"root path"| S1[Next.js (Web-UI)]
+  CDN -->|"API & WS routes"| S2[Edge/BFF (Express)]
   S2 --> S3[Core API]
 ```
 
