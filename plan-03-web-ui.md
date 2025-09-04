@@ -22,7 +22,7 @@ flowchart LR
   State <--> WS
   State <--> API
   subgraph External
-    BFF[S2 Edge/BFF\n(REST/WSS)]
+    BFF["S2 Edge/BFF<br>(REST/WSS)"]
   end
   API -- HTTPS --> BFF
   WS <-. WSS .-> BFF
