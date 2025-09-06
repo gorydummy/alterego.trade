@@ -41,18 +41,18 @@
 ```ts
 // tests/factories.ts
 export const fxUser = (o: Partial<User> = {}): User => ({
-  id: cuid(), email: faker.internet.email().toLowerCase(),
+  id: nanoid(), email: faker.internet.email().toLowerCase(),
   passwordHash: 'argon2id$stub', createdAt: new Date().toISOString(), ...o
 });
 
 export const fxTrade = (o: Partial<Trade> = {}): Trade => ({
-  id: cuid(), userId: o.userId!, broker: 'coinbase', extId: faker.string.uuid(),
+  id: nanoid(), userId: o.userId!, broker: 'coinbase', extId: faker.string.uuid(),
   symbol: 'BTC-USD', side: 'BUY', qty: 0.1, price: 25000, fee: 1.5,
   ts: new Date().toISOString(), ...o
 });
 
 export const fxBias = (o: Partial<BiasTag> = {}): BiasTag => ({
-  id: cuid(), tradeId: o.tradeId!, label: 'FOMO', confidence: 0.78,
+  id: nanoid(), tradeId: o.tradeId!, label: 'FOMO', confidence: 0.78,
   features: { spike_pct: 12.4, window_h: 24 }, createdAt: new Date().toISOString(), ...o
 });
 ```

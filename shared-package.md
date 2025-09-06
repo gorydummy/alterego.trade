@@ -66,7 +66,7 @@ import { z } from "zod";
 
 /** Entities (align with our ERD) */
 export const Trade = z.object({
-  id: z.string().cuid2(),
+  id: z.string().nanoid(),
   userId: z.string(),
   broker: z.enum(["coinbase","binance"]),
   extId: z.string(),
@@ -80,7 +80,7 @@ export const Trade = z.object({
 export type Trade = z.infer<typeof Trade>;
 
 export const BiasTag = z.object({
-  id: z.string().cuid2(),
+  id: z.string().nanoid(),
   tradeId: z.string(),
   label: z.enum(["FOMO","PANIC","DISCIPLINE","NEUTRAL"]),
   confidence: z.number().min(0).max(1),
@@ -90,7 +90,7 @@ export const BiasTag = z.object({
 export type BiasTag = z.infer<typeof BiasTag>;
 
 export const WeeklyDigest = z.object({
-  id: z.string().cuid2(),
+  id: z.string().nanoid(),
   userId: z.string(),
   periodStart: z.string().date(),
   periodEnd: z.string().date(),

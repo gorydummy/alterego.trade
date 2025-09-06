@@ -6,21 +6,21 @@
 
 **User**
 
-* `id` (cuid, PK)
+* `id` (nanoid, PK)
 * `email` (unique)
 * `passwordHash` (Argon2id)
 * `createdAt` (timestamptz)
 
 **Session**
 
-* `id` (cuid, PK)
+* `id` (nanoid, PK)
 * `userId` (FK → User)
 * `createdAt`, `expiresAt` (timestamptz)
 * `ipHash` (sha256(IP+pepper)), `uaHash` (nullable)
 
 **BrokerConnection**
 
-* `id` (cuid, PK), `userId` (FK → User)
+* `id` (nanoid, PK), `userId` (FK → User)
 * `broker` (`coinbase` | `binance` | …)
 * `status` (`active`|`paused`|`revoked`)
 * `accessEnc` (bytes, AES-GCM), `refreshEnc` (bytes, nullable)
@@ -28,7 +28,7 @@
 
 **Trade**
 
-* `id` (cuid, PK), `userId` (FK → User)
+* `id` (nanoid, PK), `userId` (FK → User)
 * `broker` (string), `extId` (broker trade id)
 * `symbol` (string), `side` (`BUY`|`SELL`)
 * `qty` (decimal), `price` (decimal), `fee` (decimal, nullable)
@@ -37,7 +37,7 @@
 
 **BiasTag**
 
-* `id` (cuid, PK), `tradeId` (FK → Trade)
+* `id` (nanoid, PK), `tradeId` (FK → Trade)
 * `label` (`FOMO`|`PANIC`|`DISCIPLINE`|…)
 * `confidence` (float 0..1)
 * `features` (jsonb; compact feature summary)
@@ -45,21 +45,21 @@
 
 **Rule**
 
-* `id` (cuid, PK), `userId` (FK → User)
+* `id` (nanoid, PK), `userId` (FK → User)
 * `kind` (e.g., `avoidSpikeOverPct`)
 * `params` (jsonb; e.g., `{ pct: 10, lookbackHours: 24 }`)
 * `active` (boolean, default true)
 
 **Digest**
 
-* `id` (cuid, PK), `userId` (FK → User)
+* `id` (nanoid, PK), `userId` (FK → User)
 * `periodStart` (date), `periodEnd` (date)
 * `payload` (jsonb; counts by bias, P/L attribution, streaks, suggestion)
 * `deliveredAt` (timestamptz, nullable)
 
 **Audit**
 
-* `id` (cuid, PK), `userId` (FK → User)
+* `id` (nanoid, PK), `userId` (FK → User)
 * `action` (`login`, `broker_linked`, `import_start`, `import_done`, …)
 * `meta` (jsonb), `createdAt` (timestamptz)
 

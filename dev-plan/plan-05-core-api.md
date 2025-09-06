@@ -426,7 +426,7 @@ export function subscribe(userId: string, onEvent: (e:any)=>void) {
 
 ```prisma
 model BrokerConnection {
-  id         String   @id @default(cuid())
+  id         String   @id @default(nanoid())
   userId     String   @index
   broker     String
   status     String   @default("active")
@@ -438,7 +438,7 @@ model BrokerConnection {
 }
 
 model Trade {
-  id       String   @id @default(cuid())
+  id       String   @id @default(nanoid())
   userId   String   @index
   broker   String
   extId    String
@@ -452,7 +452,7 @@ model Trade {
 }
 
 model BiasTag {
-  id         String   @id @default(cuid())
+  id         String   @id @default(nanoid())
   tradeId    String   @index
   label      String
   confidence Float

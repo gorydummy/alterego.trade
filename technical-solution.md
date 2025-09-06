@@ -41,9 +41,9 @@
 
 ## 2) Data Model (Prisma, with Security Notes)
 
-```prisma
+``prisma
 model User {
-  id            String   @id @default(cuid())
+  id            String   @id @default(nanoid())
   email         String   @unique
   passwordHash  String   // scrypt/argon2id
   createdAt     DateTime @default(now())
@@ -56,7 +56,7 @@ model User {
 }
 
 model Session {
-  id         String   @id @default(cuid())
+  id         String   @id @default(nanoid())
   userId     String   @index
   user       User     @relation(fields: [userId], references: [id])
   createdAt  DateTime @default(now())
@@ -66,7 +66,7 @@ model Session {
 }
 
 model BrokerConnection {
-  id         String   @id @default(cuid())
+  id         String   @id @default(nanoid())
   userId     String   @index
   user       User     @relation(fields: [userId], references: [id])
   broker     String
@@ -79,7 +79,7 @@ model BrokerConnection {
 }
 
 model Trade {
-  id        String   @id @default(cuid())
+  id        String   @id @default(nanoid())
   userId    String   @index
   broker    String
   extId     String   // broker trade id
@@ -93,7 +93,7 @@ model Trade {
 }
 
 model BiasTag {
-  id          String   @id @default(cuid())
+  id          String   @id @default(nanoid())
   tradeId     String   @index
   label       String   // FOMO|PANIC|DISCIPLINE|...
   confidence  Float
@@ -102,7 +102,7 @@ model BiasTag {
 }
 
 model Digest {
-  id          String   @id @default(cuid())
+  id          String   @id @default(nanoid())
   userId      String   @index
   periodStart DateTime
   periodEnd   DateTime
@@ -111,7 +111,7 @@ model Digest {
 }
 
 model Rule {
-  id        String   @id @default(cuid())
+  id        String   @id @default(nanoid())
   userId    String   @index
   kind      String   // e.g., avoidSpikeOverPct
   params    Json
@@ -119,7 +119,7 @@ model Rule {
 }
 
 model Audit {
-  id        String   @id @default(cuid())
+  id        String   @id @default(nanoid())
   userId    String   @index
   action    String   // login, broker_linked, import_start, import_done, etc.
   meta      Json
